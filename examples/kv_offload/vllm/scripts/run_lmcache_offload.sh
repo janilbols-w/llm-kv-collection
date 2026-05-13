@@ -27,6 +27,14 @@ if [[ "${LMCACHE_CONFIG_FILE}" == "${DEFAULT_LMCACHE_CONFIG_FILE}" ]]; then
   USING_DEFAULT_LMCACHE_CONFIG=1
 fi
 
+# Runtime lmcache_instance_id injection.
+# When enabled, the script generates a temporary runtime config based on
+# LMCACHE_CONFIG_FILE and overrides lmcache_instance_id without editing source files.
+LMCACHE_INSTANCE_NAME=${LMCACHE_INSTANCE_NAME:-}
+LMCACHE_INSTANCE_NAME_FROM_HOST_PORT=${LMCACHE_INSTANCE_NAME_FROM_HOST_PORT:-1}
+LMCACHE_RUNTIME_CONFIG_DIR=${LMCACHE_RUNTIME_CONFIG_DIR:-/tmp}
+RUNTIME_LMCACHE_CONFIG_FILE=""
+
 # Optional controller startup (0=off, 1=on)
 START_LMCACHE_CONTROLLER=${START_LMCACHE_CONTROLLER:-0}
 LMCACHE_CONTROLLER_HOST=${LMCACHE_CONTROLLER_HOST:-127.0.0.1}
@@ -104,6 +112,54 @@ EOF
   exit 1
 fi
 
+derive_instance_name_from_host_port() {
+  local host_part port_part
+  host_part="$(echo "${HOST}" | tr '.:-' '___')"
+  port_part="$(echo "${PORT}" | tr -cd '0-9')"
+  echo "lmcache_${host_part}_${port_part}"
+}
+
+render_runtime_lmcache_config() {
+  local src_cfg="$1"
+  local dst_cfg="$2"
+  local instance_name="$3"
+
+  python3 - "$src_cfg" "$dst_cfg" "$instance_name" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+instance_name = sys.argv[3]
+
+text = src.read_text(encoding="utf-8", errors="ignore")
+pattern = re.compile(r"(?m)^\s*lmcache_instance_id\s*:\s*.*$")
+replacement = f'lmcache_instance_id: "{instance_name}"'
+
+if pattern.search(text):
+    text = pattern.sub(replacement, text, count=1)
+else:
+    if not text.endswith("\n"):
+        text += "\n"
+    text += replacement + "\n"
+
+dst.write_text(text, encoding="utf-8")
+PY
+}
+
+if [[ -z "${LMCACHE_INSTANCE_NAME}" && "${LMCACHE_INSTANCE_NAME_FROM_HOST_PORT}" == "1" ]]; then
+  LMCACHE_INSTANCE_NAME="$(derive_instance_name_from_host_port)"
+fi
+
+if [[ -n "${LMCACHE_INSTANCE_NAME}" ]]; then
+  mkdir -p "${LMCACHE_RUNTIME_CONFIG_DIR}"
+  RUNTIME_LMCACHE_CONFIG_FILE="$(mktemp "${LMCACHE_RUNTIME_CONFIG_DIR%/}/lmcache.runtime.${PORT}.XXXXXX.yaml")"
+  render_runtime_lmcache_config "${LMCACHE_CONFIG_FILE}" "${RUNTIME_LMCACHE_CONFIG_FILE}" "${LMCACHE_INSTANCE_NAME}"
+  LMCACHE_CONFIG_FILE="${RUNTIME_LMCACHE_CONFIG_FILE}"
+  export LMCACHE_CONFIG_FILE
+fi
+
 if [[ "${START_LMCACHE_CONTROLLER}" == "1" ]]; then
   if ! command -v lmcache_controller >/dev/null 2>&1; then
     echo "[ERROR] lmcache_controller command not found. Install lmcache extras or check PATH." >&2
@@ -129,6 +185,9 @@ EOF
 echo "[INFO] vLLM start with LMCache KV offload"
 echo "[INFO] host=${HOST} port=${PORT} role=${KV_ROLE}"
 echo "[INFO] LMCACHE_CONFIG_FILE=${LMCACHE_CONFIG_FILE}"
+if [[ -n "${LMCACHE_INSTANCE_NAME}" ]]; then
+  echo "[INFO] lmcache_instance_id=${LMCACHE_INSTANCE_NAME} (runtime injected)"
+fi
 
 vllm serve "${MODEL_PATH}" \
   --host "${HOST}" \

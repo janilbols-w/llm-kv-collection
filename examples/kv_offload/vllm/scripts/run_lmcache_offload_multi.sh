@@ -4,18 +4,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 KV_OFFLOAD_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
-RUN_LMCACHE_OFFLOAD="${RUN_LMCACHE_OFFLOAD:-${SCRIPT_DIR}/run_lmcache_offload.sh}"
+RUN_LMCACHE_OFFLOAD_INSTANCE="${RUN_LMCACHE_OFFLOAD_INSTANCE:-${SCRIPT_DIR}/run_lmcache_offload_instance.sh}"
 
 HOST_A="${HOST_A:-127.0.0.1}"
 PORT_A="${PORT_A:-12358}"
 SERVED_NAME_A="${SERVED_NAME_A:-mymodel-a}"
 LMCACHE_CONFIG_FILE_A="${LMCACHE_CONFIG_FILE_A:-${KV_OFFLOAD_ROOT}/config/lmcache.instance_a.template.yaml}"
+LMCACHE_INSTANCE_NAME_A="${LMCACHE_INSTANCE_NAME_A:-}"
 GPU_A="${GPU_A:-}"
 
 HOST_B="${HOST_B:-127.0.0.1}"
 PORT_B="${PORT_B:-12359}"
 SERVED_NAME_B="${SERVED_NAME_B:-mymodel-b}"
 LMCACHE_CONFIG_FILE_B="${LMCACHE_CONFIG_FILE_B:-${KV_OFFLOAD_ROOT}/config/lmcache.instance_b.template.yaml}"
+LMCACHE_INSTANCE_NAME_B="${LMCACHE_INSTANCE_NAME_B:-}"
 GPU_B="${GPU_B:-}"
 
 AUTO_SELECT_IDLE_GPUS="${AUTO_SELECT_IDLE_GPUS:-1}"
@@ -23,7 +25,7 @@ IDLE_GPU_MEMORY_THRESHOLD_MIB="${IDLE_GPU_MEMORY_THRESHOLD_MIB:-512}"
 
 STARTUP_TIMEOUT_SECS="${STARTUP_TIMEOUT_SECS:-300}"
 
-OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRIPT_DIR}/outputs/multi_lmcache}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${KV_OFFLOAD_ROOT}/outputs/multi_lmcache}"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${OUTPUT_ROOT}/${RUN_TS}"
 CHECKS_LOG="${RUN_DIR}/checks.log"
@@ -142,7 +144,7 @@ wait_for_url() {
 }
 
 main() {
-  require_file "${RUN_LMCACHE_OFFLOAD}"
+  require_file "${RUN_LMCACHE_OFFLOAD_INSTANCE}"
   require_file "${LMCACHE_CONFIG_FILE_A}"
   require_file "${LMCACHE_CONFIG_FILE_B}"
   if [[ "${AUTO_SELECT_IDLE_GPUS}" == "1" ]]; then
@@ -154,23 +156,25 @@ main() {
 
   log "Starting instance A at ${HOST_A}:${PORT_A} (GPU ${GPU_A})"
   (
-    CUDA_VISIBLE_DEVICES="${GPU_A}" \
+    GPU="${GPU_A}" \
     HOST="${HOST_A}" \
     PORT="${PORT_A}" \
     SERVED_NAME="${SERVED_NAME_A}" \
     LMCACHE_CONFIG_FILE="${LMCACHE_CONFIG_FILE_A}" \
-    bash "${RUN_LMCACHE_OFFLOAD}"
+    LMCACHE_INSTANCE_NAME="${LMCACHE_INSTANCE_NAME_A}" \
+    bash "${RUN_LMCACHE_OFFLOAD_INSTANCE}"
   ) >"${SERVER_A_LOG}" 2>&1 &
   PID_A=$!
 
   log "Starting instance B at ${HOST_B}:${PORT_B} (GPU ${GPU_B})"
   (
-    CUDA_VISIBLE_DEVICES="${GPU_B}" \
+    GPU="${GPU_B}" \
     HOST="${HOST_B}" \
     PORT="${PORT_B}" \
     SERVED_NAME="${SERVED_NAME_B}" \
     LMCACHE_CONFIG_FILE="${LMCACHE_CONFIG_FILE_B}" \
-    bash "${RUN_LMCACHE_OFFLOAD}"
+    LMCACHE_INSTANCE_NAME="${LMCACHE_INSTANCE_NAME_B}" \
+    bash "${RUN_LMCACHE_OFFLOAD_INSTANCE}"
   ) >"${SERVER_B_LOG}" 2>&1 &
   PID_B=$!
 

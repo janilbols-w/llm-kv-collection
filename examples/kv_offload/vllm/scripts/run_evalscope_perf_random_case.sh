@@ -50,7 +50,6 @@ FIXED_PROMPT_LENGTH="${FIXED_PROMPT_LENGTH:-}"
 FIXED_TURN_LENGTH="${FIXED_TURN_LENGTH:-}"
 FIXED_TURNS="${FIXED_TURNS:-}"
 FIXED_DATASET_REGENERATE="${FIXED_DATASET_REGENERATE:-0}"  # 1: rebuild dataset if it already exists
-FIXED_DATASET_LENGTH_UNIT="${FIXED_DATASET_LENGTH_UNIT:-token}"
 FIXED_DATASET_NAME_TEMPLATE="${FIXED_DATASET_NAME_TEMPLATE:-{prefix}_{mode}_seed{seed}{turns_suffix}_len{length}_{unit}_n{size}.jsonl}"
 PREPROCESS_BATCH_SIZE="${PREPROCESS_BATCH_SIZE:-32}"
 PREPROCESS_PROGRESS_EVERY="${PREPROCESS_PROGRESS_EVERY:-0}"
@@ -67,7 +66,7 @@ SEED="${SEED:-42}"
 TEMPERATURE="${TEMPERATURE:-0}"
 TOP_P="${TOP_P:-1.0}"
 TOTAL_TIMEOUT="${TOTAL_TIMEOUT:-3600}"
-OUTPUTS_DIR="${OUTPUTS_DIR:-./outputs/evalscope_perf}"
+OUTPUTS_DIR="${OUTPUTS_DIR:-${KV_OFFLOAD_ROOT}/outputs/evalscope_perf}"
 NAME_PREFIX="${NAME_PREFIX:-random-perf}"
 
 if ! command -v evalscope >/dev/null 2>&1; then
@@ -184,23 +183,23 @@ if [[ "${FIXED_DATASET}" == "1" ]]; then
     FIXED_TURNS="${MAX_TURNS}"
   fi
 
-  # EvalScope custom(single-turn) filters prompts with an inclusive range,
-  # but the historical custom plugin still rejects exact-boundary lengths in
-  # some versions. Use a 1-token/1-char open interval around the target to
-  # keep exact-length fixed samples from being filtered out.
-  if [[ "${FIXED_DATASET_LENGTH_UNIT}" == "token" || "${FIXED_DATASET_LENGTH_UNIT}" == "char" ]]; then
-    EVAL_MIN_PROMPT_LENGTH=$(( FIXED_PROMPT_LENGTH > 0 ? FIXED_PROMPT_LENGTH - 1 : 0 ))
-    EVAL_MAX_PROMPT_LENGTH=$(( FIXED_PROMPT_LENGTH + 1 ))
-  else
-    EVAL_MIN_PROMPT_LENGTH="${MIN_PROMPT_LENGTH}"
-    EVAL_MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH}"
+  # EvalScope filters prompts/conversations by min/max prompt length.
+  # In token-fast generation mode, decoded text may not map back to an exact
+  # token length after re-tokenization, so allow +/-20% tolerance.
+  EVAL_MIN_PROMPT_LENGTH=$(( (FIXED_PROMPT_LENGTH * 80) / 100 ))
+  EVAL_MAX_PROMPT_LENGTH=$(( (FIXED_PROMPT_LENGTH * 120) / 100 ))
+  if (( EVAL_MIN_PROMPT_LENGTH < 1 )); then
+    EVAL_MIN_PROMPT_LENGTH=1
+  fi
+  if (( EVAL_MAX_PROMPT_LENGTH < EVAL_MIN_PROMPT_LENGTH )); then
+    EVAL_MAX_PROMPT_LENGTH="${EVAL_MIN_PROMPT_LENGTH}"
   fi
 
   export SEED FIXED_DATASET_SIZE FIXED_PROMPT_LENGTH FIXED_TURN_LENGTH FIXED_TURNS
 
   if [[ "${MULTI_TURN}" == "1" ]]; then
     DATASET="custom_multi_turn"
-    DATASET_PATH="${FIXED_DATASET_DIR}/$(render_dataset_name "${FIXED_DATASET_NAME_TEMPLATE}" "${NAME_PREFIX}" "multi" "${SEED}" "${FIXED_DATASET_SIZE}" "${FIXED_PROMPT_LENGTH}" "${FIXED_TURN_LENGTH}" "${FIXED_TURNS}" "${FIXED_DATASET_LENGTH_UNIT}")"
+    DATASET_PATH="${FIXED_DATASET_DIR}/$(render_dataset_name "${FIXED_DATASET_NAME_TEMPLATE}" "${NAME_PREFIX}" "multi" "${SEED}" "${FIXED_DATASET_SIZE}" "${FIXED_PROMPT_LENGTH}" "${FIXED_TURN_LENGTH}" "${FIXED_TURNS}" "token")"
     if [[ -f "${DATASET_PATH}" && "${FIXED_DATASET_REGENERATE}" != "1" ]]; then
       EXISTING_LINES="$(count_dataset_lines "${DATASET_PATH}")"
       if [[ "${EXISTING_LINES}" == "${FIXED_DATASET_SIZE}" ]]; then
@@ -215,11 +214,9 @@ if [[ "${FIXED_DATASET}" == "1" ]]; then
           --seed "${SEED}" \
           --turns "${FIXED_TURNS}" \
           --turn-length "${FIXED_TURN_LENGTH}" \
-          --length-unit "${FIXED_DATASET_LENGTH_UNIT}" \
           --batch-size "${PREPROCESS_BATCH_SIZE}" \
           --progress-every "${PREPROCESS_PROGRESS_EVERY}" \
           --tokenizer-path "${TOKENIZER_PATH}" \
-          --apply-chat-template \
           $( [[ "${FIXED_DATASET_REGENERATE}" == "1" ]] && echo --overwrite )
         echo "[INFO] Fixed dataset generated at: ${DATASET_PATH}"
       fi
@@ -231,11 +228,9 @@ if [[ "${FIXED_DATASET}" == "1" ]]; then
         --seed "${SEED}" \
         --turns "${FIXED_TURNS}" \
         --turn-length "${FIXED_TURN_LENGTH}" \
-        --length-unit "${FIXED_DATASET_LENGTH_UNIT}" \
         --batch-size "${PREPROCESS_BATCH_SIZE}" \
         --progress-every "${PREPROCESS_PROGRESS_EVERY}" \
         --tokenizer-path "${TOKENIZER_PATH}" \
-        --apply-chat-template \
         $( [[ "${FIXED_DATASET_REGENERATE}" == "1" ]] && echo --overwrite )
       echo "[INFO] Fixed dataset generated at: ${DATASET_PATH}"
     fi
@@ -248,17 +243,15 @@ if [[ "${FIXED_DATASET}" == "1" ]]; then
         --seed "${SEED}" \
         --turns "${FIXED_TURNS}" \
         --turn-length "${FIXED_TURN_LENGTH}" \
-        --length-unit "${FIXED_DATASET_LENGTH_UNIT}" \
         --batch-size "${PREPROCESS_BATCH_SIZE}" \
         --progress-every "${PREPROCESS_PROGRESS_EVERY}" \
         --tokenizer-path "${TOKENIZER_PATH}" \
-        --apply-chat-template \
         --overwrite
     fi
     MULTI_TURN_FLAGS=(--multi-turn --max-turns "${FIXED_TURNS}")
   else
     DATASET="custom"
-    DATASET_PATH="${FIXED_DATASET_DIR}/$(render_dataset_name "${FIXED_DATASET_NAME_TEMPLATE}" "${NAME_PREFIX}" "single" "${SEED}" "${FIXED_DATASET_SIZE}" "${FIXED_PROMPT_LENGTH}" "${FIXED_TURN_LENGTH}" "${FIXED_TURNS}" "${FIXED_DATASET_LENGTH_UNIT}")"
+    DATASET_PATH="${FIXED_DATASET_DIR}/$(render_dataset_name "${FIXED_DATASET_NAME_TEMPLATE}" "${NAME_PREFIX}" "single" "${SEED}" "${FIXED_DATASET_SIZE}" "${FIXED_PROMPT_LENGTH}" "${FIXED_TURN_LENGTH}" "${FIXED_TURNS}" "token")"
     if [[ -f "${DATASET_PATH}" && "${FIXED_DATASET_REGENERATE}" != "1" ]]; then
       EXISTING_LINES="$(count_dataset_lines "${DATASET_PATH}")"
       if [[ "${EXISTING_LINES}" == "${FIXED_DATASET_SIZE}" ]]; then
@@ -272,11 +265,9 @@ if [[ "${FIXED_DATASET}" == "1" ]]; then
           --size "${FIXED_DATASET_SIZE}" \
           --seed "${SEED}" \
           --prompt-length "${FIXED_PROMPT_LENGTH}" \
-          --length-unit "${FIXED_DATASET_LENGTH_UNIT}" \
           --batch-size "${PREPROCESS_BATCH_SIZE}" \
           --progress-every "${PREPROCESS_PROGRESS_EVERY}" \
           --tokenizer-path "${TOKENIZER_PATH}" \
-          --apply-chat-template \
           $( [[ "${FIXED_DATASET_REGENERATE}" == "1" ]] && echo --overwrite )
         echo "[INFO] Fixed dataset generated at: ${DATASET_PATH}"
       fi
@@ -287,11 +278,9 @@ if [[ "${FIXED_DATASET}" == "1" ]]; then
         --size "${FIXED_DATASET_SIZE}" \
         --seed "${SEED}" \
         --prompt-length "${FIXED_PROMPT_LENGTH}" \
-        --length-unit "${FIXED_DATASET_LENGTH_UNIT}" \
         --batch-size "${PREPROCESS_BATCH_SIZE}" \
         --progress-every "${PREPROCESS_PROGRESS_EVERY}" \
         --tokenizer-path "${TOKENIZER_PATH}" \
-        --apply-chat-template \
         $( [[ "${FIXED_DATASET_REGENERATE}" == "1" ]] && echo --overwrite )
       echo "[INFO] Fixed dataset generated at: ${DATASET_PATH}"
     fi
@@ -303,11 +292,9 @@ if [[ "${FIXED_DATASET}" == "1" ]]; then
         --size "${FIXED_DATASET_SIZE}" \
         --seed "${SEED}" \
         --prompt-length "${FIXED_PROMPT_LENGTH}" \
-        --length-unit "${FIXED_DATASET_LENGTH_UNIT}" \
         --batch-size "${PREPROCESS_BATCH_SIZE}" \
         --progress-every "${PREPROCESS_PROGRESS_EVERY}" \
         --tokenizer-path "${TOKENIZER_PATH}" \
-        --apply-chat-template \
         --overwrite
     fi
   fi

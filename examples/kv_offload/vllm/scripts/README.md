@@ -1,10 +1,16 @@
-# vLLM Sleep / Benchmark Scripts
+# vLLM LMCache Scripts
 
-这个目录包含两个脚本：
+这个目录包含以下常用脚本：
 
 - `vllm_sleep_wake_cli.py`：调用 vLLM Sleep Mode 开发接口的 CLI
 - `run_evalscope_perf_random_case.sh`：基于 EvalScope perf 的可重复 benchmark 用例
 - `preprocess_evalscope_perf_data.py`：为 benchmark 生成固定输入数据
+- `run_lmcache_offload.sh`：启动单实例 vLLM + LMCache
+- `run_lmcache_offload_instance.sh`：单实例 wrapper（支持按 HOST/PORT 注入 `lmcache_instance_id`）
+- `run_e2e_lmcache_sleep_wake.sh`：单实例 sleep/wake e2e
+- `run_e2e_lmcache_cross_instance.sh`：双实例 A/B + remote backend e2e
+- `run_redis_remote_server.sh`：本地 Redis remote backend 启停/status
+- `cleanup_vllm_residual.sh`：清理残留 vLLM 相关进程
 
 支持接口：
 - `POST /sleep`
@@ -42,6 +48,12 @@ Benchmark 默认入口：
 
 ```bash
 bash run_evalscope_perf_random_case.sh
+```
+
+Cross-instance e2e 默认入口：
+
+```bash
+bash run_e2e_lmcache_cross_instance.sh
 ```
 
 ## 3. 命令说明
@@ -182,6 +194,12 @@ python vllm_sleep_wake_cli.py wake --query a=1 --query b=2
 
 这意味着同一组测试参数下，多轮重复跑到的是同一批输入。
 
+另外，当前实现已精简为单路径：`token-fast`。
+
+- 固定数据按 token 序列生成后一次 decode
+- 不再做 decode 后的反复 encode 校正
+- 以生成速度优先
+
 ### 常用参数
 
 - `MODEL`：模型名
@@ -197,25 +215,88 @@ python vllm_sleep_wake_cli.py wake --query a=1 --query b=2
 - `FIXED_DATASET=1`：启用固定数据复用模式，默认开启
 - `FIXED_DATASET_REGENERATE=1`：强制重新生成固定数据
 - `FIXED_DATASET_DIR`：固定数据落盘目录
-- `FIXED_DATASET_LENGTH_UNIT`：固定数据长度单位，支持 `token` / `char`，默认 `token`
 - `FIXED_DATASET_NAME_TEMPLATE`：固定数据文件名模板
 
 ### 长度单位说明（重要）
 
 `evalscope perf` 在设置了 `--tokenizer-path` 时，会按 token 数检查 `min/max_prompt_length`。
 
-因此推荐默认使用：
+当前脚本固定使用 token 口径生成与过滤，避免了 `char` 与 token 口径不一致导致的空数据问题。
 
-- `FIXED_DATASET_LENGTH_UNIT=token`
-- 同时配置 `TOKENIZER_PATH`
+### Cross-instance e2e（A/B + remote backend）
 
-这样预处理生成的数据长度与 EvalScope 的过滤口径一致，避免出现 `Dataset is empty!`。
+`run_e2e_lmcache_cross_instance.sh` 当前默认流程：
 
-如果使用 `char` 模式，需要注意：
+1. 启动 A/B 两个实例
+2. case1: `case1_a_warm_seed`
+3. case2: `case2_a_after_a_warm`
+4. case3: `case3_b_after_a_warm`
+5. case4: `case4_b_after_b_test`
+6. 对 A/B 执行 sleep/wake
+7. case5: `case5_a_after_ab_sleep_wake`
+8. case6: `case6_b_after_ab_sleep_wake`
 
-- 预处理按字符长度生成
-- EvalScope 可能仍按 token 长度过滤（取决于是否传入 tokenizer）
-- 两者口径不一致时，可能导致样本被全部过滤
+默认行为：
+
+- 自动管理 Redis remote backend（`AUTO_MANAGE_REMOTE_REDIS=1`）
+- 默认 remote backend 示例：`resp://127.0.0.1:7379`
+- 退出时自动执行残留清理（`AUTO_CLEANUP_VLLM_RESIDUAL=1`）
+
+### 多机手动部署（不改 config 文件）
+
+如果 A/B 在不同节点，建议每台机器分别启动一个实例。`run_lmcache_offload_instance.sh`
+会把 `HOST/PORT` 注入为运行时的 `lmcache_instance_id`（写到临时配置），不会修改原始模板文件。
+
+机器 A：
+
+```bash
+HOST=10.0.0.11 \
+PORT=12358 \
+GPU=0 \
+SERVED_NAME=mymodel-a \
+LMCACHE_CONFIG_FILE=../config/lmcache.instance_a.template.yaml \
+bash run_lmcache_offload_instance.sh
+```
+
+机器 B：
+
+```bash
+HOST=10.0.0.12 \
+PORT=12358 \
+GPU=0 \
+SERVED_NAME=mymodel-b \
+LMCACHE_CONFIG_FILE=../config/lmcache.instance_b.template.yaml \
+bash run_lmcache_offload_instance.sh
+```
+
+可选：显式覆盖实例名（否则默认用 HOST/PORT 派生）
+
+```bash
+LMCACHE_INSTANCE_NAME=lmcache_instance_custom_a \
+HOST=10.0.0.11 PORT=12358 \
+LMCACHE_CONFIG_FILE=../config/lmcache.instance_a.template.yaml \
+bash run_lmcache_offload_instance.sh
+```
+
+在第三台机器（或任一可访问 A/B 的节点）运行 cross-instance e2e：
+
+```bash
+START_INSTANCES=0 \
+AUTO_SELECT_IDLE_GPUS=0 \
+AUTO_CLEANUP_VLLM_RESIDUAL=0 \
+AUTO_MANAGE_REMOTE_REDIS=0 \
+HOST_A=10.0.0.11 PORT_A=12358 SERVED_NAME_A=mymodel-a \
+HOST_B=10.0.0.12 PORT_B=12358 SERVED_NAME_B=mymodel-b \
+LMCACHE_CONFIG_FILE_A=../config/lmcache.instance_a.template.yaml \
+LMCACHE_CONFIG_FILE_B=../config/lmcache.instance_b.template.yaml \
+bash run_e2e_lmcache_cross_instance.sh
+```
+
+说明：
+
+- `START_INSTANCES=0`：不在本机拉起 A/B，只连接外部已启动实例。
+- `AUTO_MANAGE_REMOTE_REDIS=0`：多机场景通常由你手动管理 remote backend。
+- `AUTO_CLEANUP_VLLM_RESIDUAL=0`：避免 e2e 退出时误清理非本机实例。
 
 ### 文件命名模板
 
@@ -236,7 +317,7 @@ python vllm_sleep_wake_cli.py wake --query a=1 --query b=2
 - `{turns}`：多轮 turns 数
 - `{length}`：自动映射到单轮或多轮的长度字段
 - `{turns_suffix}`：多轮时自动补 `_turnsN`，单轮时为空
-- `{unit}`：长度单位（`token` 或 `char`）
+- `{unit}`：固定为 `token`
 
 ### 示例
 
