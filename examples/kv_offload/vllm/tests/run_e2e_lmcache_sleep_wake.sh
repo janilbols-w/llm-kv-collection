@@ -4,9 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 KV_OFFLOAD_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
-RUN_LMCACHE_OFFLOAD="${RUN_LMCACHE_OFFLOAD:-${SCRIPT_DIR}/run_lmcache_offload.sh}"
-RUN_EVALSCOPE_PERF="${RUN_EVALSCOPE_PERF:-${SCRIPT_DIR}/run_evalscope_perf_random_case.sh}"
-SLEEP_WAKE_CLI="${SLEEP_WAKE_CLI:-${SCRIPT_DIR}/vllm_sleep_wake_cli.py}"
+RUN_LMCACHE_OFFLOAD="${RUN_LMCACHE_OFFLOAD:-${KV_OFFLOAD_ROOT}/scripts/run_lmcache_offload.sh}"
+RUN_EVALSCOPE_PERF="${RUN_EVALSCOPE_PERF:-${KV_OFFLOAD_ROOT}/scripts/run_evalscope_perf_random_case.sh}"
+SLEEP_WAKE_CLI="${SLEEP_WAKE_CLI:-${KV_OFFLOAD_ROOT}/scripts/vllm_sleep_wake_cli.py}"
 
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-12358}"
