@@ -1,0 +1,43 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.python-version
+.venv/
+venv/
+env/
+
+# Build / cache
+build/
+dist/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.cache/
+
+# Node / frontend
+node_modules/
+
+# Rust / cargo
+target/
+
+# C/C++ build artifacts
+*.o
+*.so
+*.a
+*.out
+
+# Logs / temp
+*.log
+*.tmp
+
+# Benchmark outputs (generated)
+outputs/
+

@@ -1,0 +1,18 @@
+[submodule "3rdparty/FlexKV"]
+	path = 3rdparty/FlexKV
+	url = https://github.com/taco-project/FlexKV
+[submodule "3rdparty/lmcache"]
+	path = 3rdparty/lmcache
+	url = https://github.com/lmcache/lmcache
+[submodule "3rdparty/evalscope"]
+	path = 3rdparty/evalscope
+	url = https://github.com/modelscope/evalscope
+[submodule "3rdparty/Mooncake"]
+	path = 3rdparty/Mooncake
+	url = https://github.com/kvcache-ai/Mooncake
+[submodule "3rdparty/router"]
+	path = 3rdparty/router
+	url = https://github.com/vllm-project/router
+[submodule "3rdparty/vllm"]
+	path = 3rdparty/vllm
+	url = https://github.com/vllm-project/vllm

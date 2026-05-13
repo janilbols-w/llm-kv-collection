@@ -1,0 +1,119 @@
+# LMCache config template for vLLM + LMCacheConnectorV1
+# Usage:
+#   export LMCACHE_CONFIG_FILE=/data_ssd1/hz_home/llm-kv/_playground/kv_offload/config/lmcache.template.yaml
+#   ./_playground/kv_offload/scripts/run_lmcache_offload.sh
+#
+# Config priority (high -> low):
+#   CLI args > this YAML > LMCACHE_* env vars > defaults
+
+# =========================
+# Core cache settings
+# =========================
+chunk_size: 256
+local_cpu: true
+max_local_cpu_size: 8.0
+reserve_local_cpu_size: 0.0
+
+# If true, also save non-full chunks (usually keep false unless you need it)
+save_unfull_chunk: false
+
+# Cache policy: LRU / LFU (depends on backend support)
+cache_policy: "LRU"
+
+# Retrieve timeout in seconds when backend operations block
+blocking_timeout_secs: 120
+
+# Optional: if hit tokens < min_retrieve_tokens, skip retrieve
+min_retrieve_tokens: 0
+
+# =========================
+# Local disk tier (optional)
+# =========================
+# Enable local disk cache tier by setting local_disk to file:// URI and size > 0.
+# Example path: file:///data_ssd1/hz_home/lmcache_local/
+local_disk: null
+max_local_disk_size: 0.0
+# by_gpu | by_worker | none
+local_disk_path_sharding: "by_gpu"
+
+# =========================
+# Remote backend (optional)
+# =========================
+# Common examples:
+#   RESP/Redis/Valkey: resp://127.0.0.1:6379
+#   S3: s3://bucket.region.amazonaws.com
+#   Mooncake store: mooncake://...
+remote_url: null
+# naive | safetensor | cachegen (depends on backend and deployment)
+remote_serde: "naive"
+
+# Additional backend-specific options.
+# For RESP example:
+# extra_config:
+#   resp_num_threads: 8
+#   save_chunk_meta: false
+#   # Prefer env vars for credentials if supported by your backend.
+extra_config: null
+
+# =========================
+# Async loading (optional)
+# =========================
+enable_async_loading: false
+
+# =========================
+# Controller integration (optional)
+# =========================
+# Needed if you want controller APIs (lookup/clear/pin/move/health)
+enable_controller: false
+lmcache_instance_id: null
+# Pull URL used by worker -> controller manager
+controller_pull_url: null
+# Reply URL optional in some modes
+controller_reply_url: null
+# Number of worker ports should match ranks/workers when enabled
+lmcache_worker_ports: null
+lmcache_worker_ids: null
+
+# =========================
+# P2P sharing (optional)
+# =========================
+# If enable_p2p is true, controller is typically required.
+enable_p2p: false
+p2p_host: null
+# Can be int or list[int]
+p2p_init_ports: null
+p2p_lookup_ports: null
+transfer_channel: null
+
+# =========================
+# Observability / internal API (optional)
+# =========================
+internal_api_server_enabled: false
+internal_api_server_host: "0.0.0.0"
+internal_api_server_port_start: 6999
+internal_api_server_socket_path_prefix: null
+
+# =========================
+# Blending / advanced features (optional)
+# =========================
+enable_blending: false
+blend_recompute_ratios: null
+blend_thresholds: null
+blend_check_layers: null
+blend_min_tokens: 256
+blend_special_str: " # # "
+retrieve_locations: null
+store_location: null
+
+# =========================
+# Plugin-based backends (optional)
+# =========================
+runtime_plugin_locations: null
+storage_plugins: null
+remote_storage_plugins: null
+
+# =========================
+# Remote config service (optional)
+# =========================
+remote_config_url: null
+app_id: null
