@@ -33,8 +33,6 @@ min_retrieve_tokens: 0
 # Example path: file:///data_ssd1/hz_home/lmcache_local/
 local_disk: null
 max_local_disk_size: 0.0
-# by_gpu | by_worker | none
-local_disk_path_sharding: "by_gpu"
 
 # =========================
 # Remote backend (optional)
