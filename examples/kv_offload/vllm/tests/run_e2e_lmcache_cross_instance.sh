@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 KV_OFFLOAD_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 RUN_LMCACHE_OFFLOAD="${RUN_LMCACHE_OFFLOAD:-${KV_OFFLOAD_ROOT}/scripts/run_lmcache_offload.sh}"
+RUN_NAIVE_SERVICE="${RUN_NAIVE_SERVICE:-${KV_OFFLOAD_ROOT}/scripts/run_naive_service.sh}"
 RUN_EVALSCOPE_PERF="${RUN_EVALSCOPE_PERF:-${KV_OFFLOAD_ROOT}/scripts/run_evalscope_perf_random_case.sh}"
 RUN_REDIS_REMOTE_SERVER="${RUN_REDIS_REMOTE_SERVER:-${KV_OFFLOAD_ROOT}/scripts/run_redis_remote_server.sh}"
 RUN_MOONCAKE_REMOTE_SERVER="${RUN_MOONCAKE_REMOTE_SERVER:-${KV_OFFLOAD_ROOT}/scripts/run_mooncake_remote_server.sh}"
@@ -38,10 +39,15 @@ SLEEP_WAKE_TIMEOUT_SECS="${SLEEP_WAKE_TIMEOUT_SECS:-120}"
 SLEEP_LEVEL="${SLEEP_LEVEL:-1}"
 SLEEP_MODE="${SLEEP_MODE:-wait}"
 WAKE_TAGS="${WAKE_TAGS:-weights kv_cache}"
+GMEM_UTIL="${GMEM_UTIL:-0.3}"
 
 PERF_PARALLEL="${PERF_PARALLEL:-1}"
 PERF_NUMBER="${PERF_NUMBER:-20}"
 PERF_REPEAT="${PERF_REPEAT:-1}"
+PERF_MIN_PROMPT_LENGTH="${PERF_MIN_PROMPT_LENGTH:-8192}"
+PERF_MAX_PROMPT_LENGTH="${PERF_MAX_PROMPT_LENGTH:-8192}"
+PERF_MIN_TOKENS="${PERF_MIN_TOKENS:-128}"
+PERF_MAX_TOKENS="${PERF_MAX_TOKENS:-128}"
 PERF_FIXED_DATASET="${PERF_FIXED_DATASET:-1}"
 PERF_FIXED_DATASET_REGENERATE="${PERF_FIXED_DATASET_REGENERATE:-0}"
 PERF_FIXED_DATASET_DIR="${PERF_FIXED_DATASET_DIR:-${KV_OFFLOAD_ROOT}/data/custom_gen}"
@@ -49,14 +55,15 @@ PERF_FIXED_DATASET_DIR="${PERF_FIXED_DATASET_DIR:-${KV_OFFLOAD_ROOT}/data/custom
 PERF_MULTI_TURN="${PERF_MULTI_TURN:-0}"
 PERF_MIN_TURNS="${PERF_MIN_TURNS:-2}"
 PERF_MAX_TURNS="${PERF_MAX_TURNS:-10}"
+PERF_FIXED_PROMPT_LENGTH="${PERF_FIXED_PROMPT_LENGTH:-}"
 PERF_FIXED_TURNS="${PERF_FIXED_TURNS:-}"
 PERF_FIXED_TURN_LENGTH="${PERF_FIXED_TURN_LENGTH:-}"
 
 # Enforce shared remote backend by default for cross-instance reuse validation.
 REQUIRE_REMOTE_BACKEND="${REQUIRE_REMOTE_BACKEND:-1}"
-# Remote backend selection: redis | mooncake.
+# Remote backend selection: none | redis | mooncake.
 # Mismatch with config remote_url fails fast.
-REMOTE_BACKEND_TYPE="${REMOTE_BACKEND_TYPE:-redis}" # mooncake, redis
+REMOTE_BACKEND_TYPE="${REMOTE_BACKEND_TYPE:-none}" # none, mooncake, redis
 # Auto manage selected remote backend lifecycle.
 AUTO_MANAGE_REMOTE_BACKEND="${AUTO_MANAGE_REMOTE_BACKEND:-1}"
 # Run residual cleanup script on exit.
@@ -75,6 +82,7 @@ PID_A=""
 PID_B=""
 REMOTE_BACKEND_ENDPOINT=""
 REMOTE_BACKEND_STARTED_BY_E2E="0"
+VLLM_INPUT_TOKEN_LENGTH=""
 
 mkdir -p "${RUN_DIR}" "${EVAL_OUTPUT_ROOT}" "${PERF_FIXED_DATASET_DIR}"
 
@@ -93,9 +101,13 @@ log_effective_inputs() {
   log "  REMOTE_BACKEND_TYPE=${REMOTE_BACKEND_TYPE} AUTO_MANAGE_REMOTE_BACKEND=${AUTO_MANAGE_REMOTE_BACKEND} REQUIRE_REMOTE_BACKEND=${REQUIRE_REMOTE_BACKEND}"
   log "  STARTUP_TIMEOUT_SECS=${STARTUP_TIMEOUT_SECS} SLEEP_WAKE_TIMEOUT_SECS=${SLEEP_WAKE_TIMEOUT_SECS}"
   log "  SLEEP_LEVEL=${SLEEP_LEVEL} SLEEP_MODE=${SLEEP_MODE} WAKE_TAGS='${WAKE_TAGS}'"
+  log "  GMEM_UTIL=${GMEM_UTIL}"
   log "  PERF_PARALLEL=${PERF_PARALLEL} PERF_NUMBER=${PERF_NUMBER} PERF_REPEAT=${PERF_REPEAT}"
+  log "  PERF_MIN_PROMPT_LENGTH=${PERF_MIN_PROMPT_LENGTH} PERF_MAX_PROMPT_LENGTH=${PERF_MAX_PROMPT_LENGTH}"
+  log "  PERF_MIN_TOKENS=${PERF_MIN_TOKENS} PERF_MAX_TOKENS=${PERF_MAX_TOKENS}"
   log "  PERF_FIXED_DATASET=${PERF_FIXED_DATASET} PERF_FIXED_DATASET_REGENERATE=${PERF_FIXED_DATASET_REGENERATE} PERF_FIXED_DATASET_DIR=${PERF_FIXED_DATASET_DIR}"
-  log "  PERF_MULTI_TURN=${PERF_MULTI_TURN} PERF_MIN_TURNS=${PERF_MIN_TURNS} PERF_MAX_TURNS=${PERF_MAX_TURNS} PERF_FIXED_TURNS=${PERF_FIXED_TURNS:-<auto>} PERF_FIXED_TURN_LENGTH=${PERF_FIXED_TURN_LENGTH:-<auto>}"
+  log "  PERF_MULTI_TURN=${PERF_MULTI_TURN} PERF_MIN_TURNS=${PERF_MIN_TURNS} PERF_MAX_TURNS=${PERF_MAX_TURNS} PERF_FIXED_PROMPT_LENGTH=${PERF_FIXED_PROMPT_LENGTH:-<auto>} PERF_FIXED_TURNS=${PERF_FIXED_TURNS:-<auto>} PERF_FIXED_TURN_LENGTH=${PERF_FIXED_TURN_LENGTH:-<auto>}"
+  log "  VLLM_INPUT_TOKEN_LENGTH=${VLLM_INPUT_TOKEN_LENGTH:-<unset>}"
   log "  OUTPUT_ROOT=${OUTPUT_ROOT} RUN_DIR=${RUN_DIR}"
 }
 
@@ -159,7 +171,32 @@ require_cmd() {
   fi
 }
 
+resolve_vllm_input_token_length() {
+  local input_tokens
+
+  if [[ "${PERF_MULTI_TURN}" == "1" ]]; then
+    input_tokens="${PERF_FIXED_TURN_LENGTH:-}"
+  else
+    input_tokens="${PERF_FIXED_PROMPT_LENGTH:-}"
+  fi
+
+  if [[ -z "${input_tokens}" ]]; then
+    input_tokens="${PERF_MAX_PROMPT_LENGTH}"
+  fi
+
+  if ! [[ "${input_tokens}" =~ ^[0-9]+$ ]] || (( input_tokens < 1 )); then
+    echo "[ERROR] Invalid effective input token length '${input_tokens}'. Check PERF_MAX_PROMPT_LENGTH/PERF_FIXED_PROMPT_LENGTH/PERF_FIXED_TURN_LENGTH." >&2
+    exit 1
+  fi
+
+  VLLM_INPUT_TOKEN_LENGTH="${input_tokens}"
+}
+
 resolve_lmcache_config_files() {
+  if [[ "${REMOTE_BACKEND_TYPE}" == "none" ]]; then
+    return 0
+  fi
+
   local config_subdir
   case "${REMOTE_BACKEND_TYPE}" in
     redis)
@@ -169,7 +206,7 @@ resolve_lmcache_config_files() {
       config_subdir="mooncacke"
       ;;
     *)
-      echo "[ERROR] Invalid REMOTE_BACKEND_TYPE='${REMOTE_BACKEND_TYPE}', expected: redis|mooncake" >&2
+      echo "[ERROR] Invalid REMOTE_BACKEND_TYPE='${REMOTE_BACKEND_TYPE}', expected: none|redis|mooncake" >&2
       exit 1
       ;;
   esac
@@ -254,6 +291,12 @@ PY
 }
 
 validate_remote_backend() {
+  if [[ "${REMOTE_BACKEND_TYPE}" == "none" ]]; then
+    log "REMOTE_BACKEND_TYPE=none, remote backend disabled for this comparison run"
+    echo ""
+    return 0
+  fi
+
   local remote_a remote_b
   remote_a="$(get_remote_url_from_cfg "${LMCACHE_CONFIG_FILE_A}")"
   remote_b="$(get_remote_url_from_cfg "${LMCACHE_CONFIG_FILE_B}")"
@@ -334,6 +377,14 @@ resolve_remote_backend_target() {
   mooncake_host_port="$(parse_mooncakestore_remote_url "${remote_url}")"
 
   case "${forced_type}" in
+    none)
+      if [[ -n "${remote_url}" && "${remote_url}" != "null" ]]; then
+        echo "[ERROR] REMOTE_BACKEND_TYPE=none requires empty/null remote_url, got '${remote_url}'" >&2
+        return 1
+      fi
+      echo "none:disabled"
+      return 0
+      ;;
     redis)
       if [[ -z "${redis_host_port}" ]]; then
         echo "[ERROR] REMOTE_BACKEND_TYPE=redis requires remote_url with resp:// scheme, got '${remote_url}'" >&2
@@ -351,7 +402,7 @@ resolve_remote_backend_target() {
       return 0
       ;;
     *)
-      echo "[ERROR] Invalid REMOTE_BACKEND_TYPE='${forced_type}', expected: redis|mooncake" >&2
+      echo "[ERROR] Invalid REMOTE_BACKEND_TYPE='${forced_type}', expected: none|redis|mooncake" >&2
       return 1
       ;;
   esac
@@ -403,6 +454,11 @@ PY
 start_remote_backend_if_needed() {
   local remote_url="$1"
   local backend_target backend_kind endpoint
+
+  if [[ "${REMOTE_BACKEND_TYPE}" == "none" ]]; then
+    log "REMOTE_BACKEND_TYPE=none, skip remote backend lifecycle management"
+    return 0
+  fi
 
   if [[ "${AUTO_MANAGE_REMOTE_BACKEND}" != "1" ]]; then
     log "AUTO_MANAGE_REMOTE_BACKEND=0, skip backend lifecycle management"
@@ -543,11 +599,16 @@ run_perf_case() {
     NUMBER="${PERF_NUMBER}" \
     REPEAT="${PERF_REPEAT}" \
     MULTI_TURN="${PERF_MULTI_TURN}" \
+    MIN_PROMPT_LENGTH="${PERF_MIN_PROMPT_LENGTH}" \
+    MAX_PROMPT_LENGTH="${PERF_MAX_PROMPT_LENGTH}" \
+    MIN_TOKENS="${PERF_MIN_TOKENS}" \
+    MAX_TOKENS="${PERF_MAX_TOKENS}" \
     MIN_TURNS="${PERF_MIN_TURNS}" \
     MAX_TURNS="${PERF_MAX_TURNS}" \
     FIXED_DATASET="${PERF_FIXED_DATASET}" \
     FIXED_DATASET_DIR="${PERF_FIXED_DATASET_DIR}" \
     FIXED_DATASET_REGENERATE="${PERF_FIXED_DATASET_REGENERATE}" \
+    FIXED_PROMPT_LENGTH="${PERF_FIXED_PROMPT_LENGTH}" \
     FIXED_TURNS="${PERF_FIXED_TURNS}" \
     FIXED_TURN_LENGTH="${PERF_FIXED_TURN_LENGTH}" \
     bash "${RUN_EVALSCOPE_PERF}"
@@ -603,14 +664,30 @@ trigger_sleep_wake_instance() {
 }
 
 start_instances() {
+  local start_script_a start_script_b
+  local cfg_a cfg_b
+  start_script_a="${RUN_LMCACHE_OFFLOAD}"
+  start_script_b="${RUN_LMCACHE_OFFLOAD}"
+  cfg_a="${LMCACHE_CONFIG_FILE_A:-}"
+  cfg_b="${LMCACHE_CONFIG_FILE_B:-}"
+
+  if [[ "${REMOTE_BACKEND_TYPE}" == "none" ]]; then
+    start_script_a="${RUN_NAIVE_SERVICE}"
+    start_script_b="${RUN_NAIVE_SERVICE}"
+    cfg_a=""
+    cfg_b=""
+  fi
+
   log "Starting instance A at ${BASE_URL_A} (GPU ${GPU_A})"
   (
     CUDA_VISIBLE_DEVICES="${GPU_A}" \
     HOST="${HOST_A}" \
     PORT="${PORT_A}" \
     SERVED_NAME="${SERVED_NAME_A}" \
-    LMCACHE_CONFIG_FILE="${LMCACHE_CONFIG_FILE_A}" \
-    bash "${RUN_LMCACHE_OFFLOAD}"
+    LMCACHE_CONFIG_FILE="${cfg_a}" \
+    GMEM_UTIL="${GMEM_UTIL}" \
+    INPUT_TOKEN_LENGTH="${VLLM_INPUT_TOKEN_LENGTH}" \
+    bash "${start_script_a}"
   ) >"${SERVER_A_LOG}" 2>&1 &
   PID_A=$!
 
@@ -620,8 +697,10 @@ start_instances() {
     HOST="${HOST_B}" \
     PORT="${PORT_B}" \
     SERVED_NAME="${SERVED_NAME_B}" \
-    LMCACHE_CONFIG_FILE="${LMCACHE_CONFIG_FILE_B}" \
-    bash "${RUN_LMCACHE_OFFLOAD}"
+    LMCACHE_CONFIG_FILE="${cfg_b}" \
+    GMEM_UTIL="${GMEM_UTIL}" \
+    INPUT_TOKEN_LENGTH="${VLLM_INPUT_TOKEN_LENGTH}" \
+    bash "${start_script_b}"
   ) >"${SERVER_B_LOG}" 2>&1 &
   PID_B=$!
 
@@ -644,12 +723,18 @@ main() {
   resolve_lmcache_config_files
 
   if [[ "${START_INSTANCES}" == "1" ]]; then
-    require_file "${RUN_LMCACHE_OFFLOAD}"
+    if [[ "${REMOTE_BACKEND_TYPE}" == "none" ]]; then
+      require_file "${RUN_NAIVE_SERVICE}"
+    else
+      require_file "${RUN_LMCACHE_OFFLOAD}"
+    fi
   fi
   require_file "${RUN_EVALSCOPE_PERF}"
   require_file "${SLEEP_WAKE_CLI}"
-  require_file "${LMCACHE_CONFIG_FILE_A}"
-  require_file "${LMCACHE_CONFIG_FILE_B}"
+  if [[ "${REMOTE_BACKEND_TYPE}" != "none" ]]; then
+    require_file "${LMCACHE_CONFIG_FILE_A}"
+    require_file "${LMCACHE_CONFIG_FILE_B}"
+  fi
   if [[ "${START_INSTANCES}" == "1" && "${AUTO_CLEANUP_VLLM_RESIDUAL}" == "1" ]]; then
     require_file "${RUN_CLEANUP_VLLM_RESIDUAL}"
   fi
@@ -663,10 +748,14 @@ main() {
     assign_idle_gpus
   fi
 
+  resolve_vllm_input_token_length
+
   validate_remote_backend
 
-  local shared_remote_url
-  shared_remote_url="$(get_remote_url_from_cfg "${LMCACHE_CONFIG_FILE_A}")"
+  local shared_remote_url=""
+  if [[ "${REMOTE_BACKEND_TYPE}" != "none" ]]; then
+    shared_remote_url="$(get_remote_url_from_cfg "${LMCACHE_CONFIG_FILE_A}")"
+  fi
 
   log_effective_inputs
 
@@ -676,7 +765,7 @@ main() {
   log "Shared fixed dataset dir: ${PERF_FIXED_DATASET_DIR}"
   log "Start instances mode: ${START_INSTANCES}"
   log "Dataset preprocess: length_unit=token"
-  log "Dataset mode: multi_turn=${PERF_MULTI_TURN}, min_turns=${PERF_MIN_TURNS}, max_turns=${PERF_MAX_TURNS}, fixed_turns=${PERF_FIXED_TURNS:-auto}, fixed_turn_length=${PERF_FIXED_TURN_LENGTH:-auto}"
+  log "Dataset mode: multi_turn=${PERF_MULTI_TURN}, min_turns=${PERF_MIN_TURNS}, max_turns=${PERF_MAX_TURNS}, fixed_prompt_length=${PERF_FIXED_PROMPT_LENGTH:-auto}, fixed_turns=${PERF_FIXED_TURNS:-auto}, fixed_turn_length=${PERF_FIXED_TURN_LENGTH:-auto}"
   if [[ "${START_INSTANCES}" == "1" ]]; then
     log "GPU assignment: A=${GPU_A}, B=${GPU_B}, auto_select=${AUTO_SELECT_IDLE_GPUS}, idle_threshold=${IDLE_GPU_MEMORY_THRESHOLD_MIB}MiB"
   fi

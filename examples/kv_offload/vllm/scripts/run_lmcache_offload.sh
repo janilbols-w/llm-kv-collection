@@ -13,8 +13,10 @@ HOST=${HOST:-0.0.0.0}
 PORT=${PORT:-12358}
 TP_SIZE=${TP:-1}
 PP_SIZE=${PP:-1}
-GMEM_UTIL=${GMEM_UTIL:-0.4}
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
+GMEM_UTIL=${GMEM_UTIL:-0.8}
+INPUT_TOKEN_LENGTH=${INPUT_TOKEN_LENGTH:-}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-}
+MAX_MODEL_LEN_AUTO=${MAX_MODEL_LEN_AUTO:-1}
 
 KV_ROLE=${KV_ROLE:-kv_both}
 
@@ -48,6 +50,23 @@ export VLLM_LOG_STATS_INTERVAL=${VLLM_LOG_STATS_INTERVAL:-5}
 export PYTHONHASHSEED=${PYTHONHASHSEED:-123}
 export LMCACHE_CONFIG_FILE
 
+resolve_max_model_len() {
+  if [[ -n "${MAX_MODEL_LEN}" ]]; then
+    return 0
+  fi
+
+  if [[ "${MAX_MODEL_LEN_AUTO}" == "1" && -n "${INPUT_TOKEN_LENGTH}" ]]; then
+    if ! [[ "${INPUT_TOKEN_LENGTH}" =~ ^[0-9]+$ ]] || (( INPUT_TOKEN_LENGTH < 1 )); then
+      echo "[ERROR] INPUT_TOKEN_LENGTH must be a positive integer, got '${INPUT_TOKEN_LENGTH}'" >&2
+      exit 1
+    fi
+    MAX_MODEL_LEN=$(( (INPUT_TOKEN_LENGTH * 120 + 99) / 100 ))
+    return 0
+  fi
+
+  MAX_MODEL_LEN=16384
+}
+
 # Add common CUDA runtime library locations to avoid libcudart lookup failures.
 for d in \
   /usr/local/cuda/lib64 \
@@ -73,6 +92,8 @@ if ! command -v vllm >/dev/null 2>&1; then
   echo "[ERROR] vllm command not found in current environment." >&2
   exit 1
 fi
+
+resolve_max_model_len
 
 if ! python3 -c "import lmcache" >/dev/null 2>&1; then
   cat >&2 <<'EOF'
@@ -184,6 +205,7 @@ EOF
 
 echo "[INFO] vLLM start with LMCache KV offload"
 echo "[INFO] host=${HOST} port=${PORT} role=${KV_ROLE}"
+echo "[INFO] input_token_length=${INPUT_TOKEN_LENGTH:-<unset>} max_model_len=${MAX_MODEL_LEN} auto=${MAX_MODEL_LEN_AUTO}"
 echo "[INFO] LMCACHE_CONFIG_FILE=${LMCACHE_CONFIG_FILE}"
 if [[ -n "${LMCACHE_INSTANCE_NAME}" ]]; then
   echo "[INFO] lmcache_instance_id=${LMCACHE_INSTANCE_NAME} (runtime injected)"
