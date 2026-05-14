@@ -21,16 +21,16 @@ max_local_disk_size: 0.0
 remote_url: "mooncakestore://127.0.0.1:50051/"
 remote_serde: "naive"
 extra_config:
-	local_hostname: "127.0.0.1"
-	metadata_server: "http://127.0.0.1:9980/metadata"
-	master_server_address: "127.0.0.1:50051"
-	protocol: "tcp"
-	device_name: ""
-	global_segment_size: 2147483648
-	local_buffer_size: 0
-	save_chunk_meta: false
-	use_exists_sync: true
-	mooncake_prefer_local_alloc: true
+  local_hostname: "127.0.0.1"
+  metadata_server: "http://127.0.0.1:9980/metadata"
+  master_server_address: "127.0.0.1:50051"
+  protocol: "tcp"
+  device_name: ""
+  global_segment_size: 2147483648
+  local_buffer_size: 0
+  save_chunk_meta: false
+  use_exists_sync: true
+  mooncake_prefer_local_alloc: true
 
 enable_async_loading: false
 
