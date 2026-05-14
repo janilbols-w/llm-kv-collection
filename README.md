@@ -48,7 +48,7 @@ pip install -U "evalscope[perf]"
 Main script directory:
 
 ```bash
-cd examples/kv_offload/vllm/scripts
+cd examples/kv_offload/vllm/tests
 ```
 
 Common entries:
