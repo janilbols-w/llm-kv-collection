@@ -7,6 +7,7 @@ KV_OFFLOAD_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 RUN_LMCACHE_OFFLOAD="${RUN_LMCACHE_OFFLOAD:-${KV_OFFLOAD_ROOT}/scripts/run_lmcache_offload.sh}"
 RUN_EVALSCOPE_PERF="${RUN_EVALSCOPE_PERF:-${KV_OFFLOAD_ROOT}/scripts/run_evalscope_perf_random_case.sh}"
 RUN_REDIS_REMOTE_SERVER="${RUN_REDIS_REMOTE_SERVER:-${KV_OFFLOAD_ROOT}/scripts/run_redis_remote_server.sh}"
+RUN_MOONCAKE_REMOTE_SERVER="${RUN_MOONCAKE_REMOTE_SERVER:-${KV_OFFLOAD_ROOT}/scripts/run_mooncake_remote_server.sh}"
 RUN_CLEANUP_VLLM_RESIDUAL="${RUN_CLEANUP_VLLM_RESIDUAL:-${KV_OFFLOAD_ROOT}/scripts/cleanup_vllm_residual.sh}"
 SLEEP_WAKE_CLI="${SLEEP_WAKE_CLI:-${KV_OFFLOAD_ROOT}/scripts/vllm_sleep_wake_cli.py}"
 
@@ -14,14 +15,14 @@ HOST_A="${HOST_A:-127.0.0.1}"
 PORT_A="${PORT_A:-12358}"
 BASE_URL_A="http://${HOST_A}:${PORT_A}"
 SERVED_NAME_A="${SERVED_NAME_A:-mymodel-a}"
-LMCACHE_CONFIG_FILE_A="${LMCACHE_CONFIG_FILE_A:-${KV_OFFLOAD_ROOT}/config/lmcache.instance_a.template.yaml}"
+LMCACHE_CONFIG_FILE_A="${LMCACHE_CONFIG_FILE_A:-}"
 GPU_A="${GPU_A:-}"
 
 HOST_B="${HOST_B:-127.0.0.1}"
 PORT_B="${PORT_B:-12359}"
 BASE_URL_B="http://${HOST_B}:${PORT_B}"
 SERVED_NAME_B="${SERVED_NAME_B:-mymodel-b}"
-LMCACHE_CONFIG_FILE_B="${LMCACHE_CONFIG_FILE_B:-${KV_OFFLOAD_ROOT}/config/lmcache.instance_b.template.yaml}"
+LMCACHE_CONFIG_FILE_B="${LMCACHE_CONFIG_FILE_B:-}"
 GPU_B="${GPU_B:-}"
 
 # Startup mode.
@@ -53,8 +54,11 @@ PERF_FIXED_TURN_LENGTH="${PERF_FIXED_TURN_LENGTH:-}"
 
 # Enforce shared remote backend by default for cross-instance reuse validation.
 REQUIRE_REMOTE_BACKEND="${REQUIRE_REMOTE_BACKEND:-1}"
-# Auto manage Redis backend lifecycle when remote_url uses resp://.
-AUTO_MANAGE_REMOTE_REDIS="${AUTO_MANAGE_REMOTE_REDIS:-1}"
+# Remote backend selection: redis | mooncake.
+# Mismatch with config remote_url fails fast.
+REMOTE_BACKEND_TYPE="${REMOTE_BACKEND_TYPE:-redis}" # mooncake, redis
+# Auto manage selected remote backend lifecycle.
+AUTO_MANAGE_REMOTE_BACKEND="${AUTO_MANAGE_REMOTE_BACKEND:-1}"
 # Run residual cleanup script on exit.
 AUTO_CLEANUP_VLLM_RESIDUAL="${AUTO_CLEANUP_VLLM_RESIDUAL:-1}"
 
@@ -69,17 +73,30 @@ SERVER_B_LOG="${RUN_DIR}/server_b.log"
 
 PID_A=""
 PID_B=""
-SHARED_REMOTE_URL=""
-REDIS_REMOTE_HOST=""
-REDIS_REMOTE_PORT=""
-REDIS_WAS_LISTENING="0"
-REDIS_STARTED_BY_E2E="0"
+REMOTE_BACKEND_ENDPOINT=""
+REMOTE_BACKEND_STARTED_BY_E2E="0"
 
 mkdir -p "${RUN_DIR}" "${EVAL_OUTPUT_ROOT}" "${PERF_FIXED_DATASET_DIR}"
 
 log() {
   local msg="$*"
   echo "[$(date +'%F %T')] ${msg}" | tee -a "${CHECKS_LOG}"
+}
+
+log_effective_inputs() {
+  log "Effective input parameters:"
+  log "  START_INSTANCES=${START_INSTANCES} AUTO_SELECT_IDLE_GPUS=${AUTO_SELECT_IDLE_GPUS} IDLE_GPU_MEMORY_THRESHOLD_MIB=${IDLE_GPU_MEMORY_THRESHOLD_MIB}"
+  log "  HOST_A=${HOST_A} PORT_A=${PORT_A} SERVED_NAME_A=${SERVED_NAME_A} GPU_A=${GPU_A:-<auto>}"
+  log "  HOST_B=${HOST_B} PORT_B=${PORT_B} SERVED_NAME_B=${SERVED_NAME_B} GPU_B=${GPU_B:-<auto>}"
+  log "  LMCACHE_CONFIG_FILE_A=${LMCACHE_CONFIG_FILE_A}"
+  log "  LMCACHE_CONFIG_FILE_B=${LMCACHE_CONFIG_FILE_B}"
+  log "  REMOTE_BACKEND_TYPE=${REMOTE_BACKEND_TYPE} AUTO_MANAGE_REMOTE_BACKEND=${AUTO_MANAGE_REMOTE_BACKEND} REQUIRE_REMOTE_BACKEND=${REQUIRE_REMOTE_BACKEND}"
+  log "  STARTUP_TIMEOUT_SECS=${STARTUP_TIMEOUT_SECS} SLEEP_WAKE_TIMEOUT_SECS=${SLEEP_WAKE_TIMEOUT_SECS}"
+  log "  SLEEP_LEVEL=${SLEEP_LEVEL} SLEEP_MODE=${SLEEP_MODE} WAKE_TAGS='${WAKE_TAGS}'"
+  log "  PERF_PARALLEL=${PERF_PARALLEL} PERF_NUMBER=${PERF_NUMBER} PERF_REPEAT=${PERF_REPEAT}"
+  log "  PERF_FIXED_DATASET=${PERF_FIXED_DATASET} PERF_FIXED_DATASET_REGENERATE=${PERF_FIXED_DATASET_REGENERATE} PERF_FIXED_DATASET_DIR=${PERF_FIXED_DATASET_DIR}"
+  log "  PERF_MULTI_TURN=${PERF_MULTI_TURN} PERF_MIN_TURNS=${PERF_MIN_TURNS} PERF_MAX_TURNS=${PERF_MAX_TURNS} PERF_FIXED_TURNS=${PERF_FIXED_TURNS:-<auto>} PERF_FIXED_TURN_LENGTH=${PERF_FIXED_TURN_LENGTH:-<auto>}"
+  log "  OUTPUT_ROOT=${OUTPUT_ROOT} RUN_DIR=${RUN_DIR}"
 }
 
 cleanup() {
@@ -92,10 +109,23 @@ cleanup() {
     fi
   done
 
-  if [[ "${AUTO_MANAGE_REMOTE_REDIS}" == "1" && "${REDIS_STARTED_BY_E2E}" == "1" ]]; then
-    log "Stopping Redis remote backend ${REDIS_REMOTE_HOST}:${REDIS_REMOTE_PORT}"
-    if ! REDIS_HOST="${REDIS_REMOTE_HOST}" REDIS_PORT="${REDIS_REMOTE_PORT}" bash "${RUN_REDIS_REMOTE_SERVER}" stop >/dev/null 2>&1; then
-      log "[WARN] Failed to stop Redis backend cleanly (${REDIS_REMOTE_HOST}:${REDIS_REMOTE_PORT})"
+  if [[ "${REMOTE_BACKEND_STARTED_BY_E2E}" == "1" ]]; then
+    local backend_host backend_port
+    backend_host="${REMOTE_BACKEND_ENDPOINT%%:*}"
+    backend_port="${REMOTE_BACKEND_ENDPOINT##*:}"
+
+    if [[ "${REMOTE_BACKEND_TYPE}" == "redis" ]]; then
+      log "Stopping Redis remote backend ${backend_host}:${backend_port}"
+      if ! REDIS_HOST="${backend_host}" REDIS_PORT="${backend_port}" bash "${RUN_REDIS_REMOTE_SERVER}" stop >/dev/null 2>&1; then
+        log "[WARN] Failed to stop Redis backend cleanly (${backend_host}:${backend_port})"
+      fi
+    elif [[ "${REMOTE_BACKEND_TYPE}" == "mooncake" ]]; then
+      log "Stopping Mooncake remote backend ${backend_host}:${backend_port}"
+      if ! MOONCAKE_HOST="${backend_host}" MOONCAKE_MASTER_PORT="${backend_port}" bash "${RUN_MOONCAKE_REMOTE_SERVER}" stop >/dev/null 2>&1; then
+        log "[WARN] Failed to stop Mooncake backend cleanly (${backend_host}:${backend_port})"
+      fi
+    else
+      log "[WARN] Unknown backend type during cleanup: REMOTE_BACKEND_TYPE='${REMOTE_BACKEND_TYPE}'"
     fi
   fi
 
@@ -126,6 +156,30 @@ require_cmd() {
   if ! command -v "${c}" >/dev/null 2>&1; then
     echo "[ERROR] Required command not found: ${c}" >&2
     exit 1
+  fi
+}
+
+resolve_lmcache_config_files() {
+  local config_subdir
+  case "${REMOTE_BACKEND_TYPE}" in
+    redis)
+      config_subdir="redis"
+      ;;
+    mooncake)
+      config_subdir="mooncacke"
+      ;;
+    *)
+      echo "[ERROR] Invalid REMOTE_BACKEND_TYPE='${REMOTE_BACKEND_TYPE}', expected: redis|mooncake" >&2
+      exit 1
+      ;;
+  esac
+
+  if [[ -z "${LMCACHE_CONFIG_FILE_A}" ]]; then
+    LMCACHE_CONFIG_FILE_A="${KV_OFFLOAD_ROOT}/config/${config_subdir}/lmcahce.instance_a.yaml"
+  fi
+
+  if [[ -z "${LMCACHE_CONFIG_FILE_B}" ]]; then
+    LMCACHE_CONFIG_FILE_B="${KV_OFFLOAD_ROOT}/config/${config_subdir}/lmcahce.instance_b.yaml"
   fi
 }
 
@@ -203,7 +257,6 @@ validate_remote_backend() {
   local remote_a remote_b
   remote_a="$(get_remote_url_from_cfg "${LMCACHE_CONFIG_FILE_A}")"
   remote_b="$(get_remote_url_from_cfg "${LMCACHE_CONFIG_FILE_B}")"
-  SHARED_REMOTE_URL="${remote_a}"
 
   log "Config A remote_url='${remote_a}'"
   log "Config B remote_url='${remote_b}'"
@@ -226,6 +279,18 @@ validate_remote_backend() {
     echo "        B: ${remote_b}" >&2
     exit 1
   fi
+
+  # Enforce backend type policy at config validation stage (independent of
+  # AUTO_MANAGE_REMOTE_BACKEND). If REMOTE_BACKEND_TYPE is explicit
+  # (redis/mooncake), remote_url must match it.
+  if ! resolve_remote_backend_target "${REMOTE_BACKEND_TYPE}" "${remote_a}" >/dev/null; then
+    echo "[ERROR] REMOTE_BACKEND_TYPE and config remote_url are inconsistent." >&2
+    echo "        REMOTE_BACKEND_TYPE=${REMOTE_BACKEND_TYPE}" >&2
+    echo "        remote_url=${remote_a}" >&2
+    exit 1
+  fi
+
+  echo "${remote_a}"
 }
 
 parse_resp_remote_url() {
@@ -242,6 +307,54 @@ if u.scheme != "resp" or not u.hostname:
 port = u.port or 6379
 print(f"{u.hostname}:{port}", end="")
 PY
+}
+
+parse_mooncakestore_remote_url() {
+  local url="$1"
+  python3 - "$url" <<'PY'
+import sys
+from urllib.parse import urlparse
+
+u = urlparse(sys.argv[1])
+if u.scheme != "mooncakestore" or not u.hostname:
+    print("", end="")
+    sys.exit(0)
+
+port = u.port or 50051
+print(f"{u.hostname}:{port}", end="")
+PY
+}
+
+resolve_remote_backend_target() {
+  local forced_type="$1"
+  local remote_url="$2"
+
+  local redis_host_port mooncake_host_port
+  redis_host_port="$(parse_resp_remote_url "${remote_url}")"
+  mooncake_host_port="$(parse_mooncakestore_remote_url "${remote_url}")"
+
+  case "${forced_type}" in
+    redis)
+      if [[ -z "${redis_host_port}" ]]; then
+        echo "[ERROR] REMOTE_BACKEND_TYPE=redis requires remote_url with resp:// scheme, got '${remote_url}'" >&2
+        return 1
+      fi
+      echo "redis:${redis_host_port}"
+      return 0
+      ;;
+    mooncake)
+      if [[ -z "${mooncake_host_port}" ]]; then
+        echo "[ERROR] REMOTE_BACKEND_TYPE=mooncake requires remote_url with mooncakestore:// scheme, got '${remote_url}'" >&2
+        return 1
+      fi
+      echo "mooncake:${mooncake_host_port}"
+      return 0
+      ;;
+    *)
+      echo "[ERROR] Invalid REMOTE_BACKEND_TYPE='${forced_type}', expected: redis|mooncake" >&2
+      return 1
+      ;;
+  esac
 }
 
 is_port_listening() {
@@ -287,41 +400,63 @@ PY
   return 1
 }
 
-start_remote_redis_if_needed() {
-  if [[ "${AUTO_MANAGE_REMOTE_REDIS}" != "1" ]]; then
-    log "AUTO_MANAGE_REMOTE_REDIS=0, skip Redis lifecycle management"
+start_remote_backend_if_needed() {
+  local remote_url="$1"
+  local backend_target backend_kind endpoint
+
+  if [[ "${AUTO_MANAGE_REMOTE_BACKEND}" != "1" ]]; then
+    log "AUTO_MANAGE_REMOTE_BACKEND=0, skip backend lifecycle management"
     return 0
   fi
 
-  local host_port
-  host_port="$(parse_resp_remote_url "${SHARED_REMOTE_URL}")"
-  if [[ -z "${host_port}" ]]; then
-    log "remote_url is not resp://, skip Redis lifecycle management: '${SHARED_REMOTE_URL}'"
+  backend_target="$(resolve_remote_backend_target "${REMOTE_BACKEND_TYPE}" "${remote_url}")" || exit 1
+  backend_kind="${backend_target%%:*}"
+  endpoint="${backend_target#*:}"
+
+  REMOTE_BACKEND_ENDPOINT="${endpoint}"
+
+  local backend_host backend_port
+  backend_host="${endpoint%%:*}"
+  backend_port="${endpoint##*:}"
+
+  if [[ "${REMOTE_BACKEND_TYPE}" == "redis" ]]; then
+    require_file "${RUN_REDIS_REMOTE_SERVER}"
+
+    if is_port_listening "${backend_host}" "${backend_port}"; then
+      log "Redis backend already listening on ${backend_host}:${backend_port}; reusing existing service"
+      return 0
+    fi
+
+    log "Starting Redis remote backend on ${backend_host}:${backend_port}"
+    REDIS_HOST="${backend_host}" REDIS_PORT="${backend_port}" bash "${RUN_REDIS_REMOTE_SERVER}" start >/dev/null
+
+    if ! is_port_listening "${backend_host}" "${backend_port}"; then
+      log "[ERROR] Redis backend failed to start on ${backend_host}:${backend_port}"
+      exit 1
+    fi
+
+    REMOTE_BACKEND_STARTED_BY_E2E="1"
+    log "Redis backend is ready on ${backend_host}:${backend_port}"
     return 0
   fi
 
-  REDIS_REMOTE_HOST="${host_port%%:*}"
-  REDIS_REMOTE_PORT="${host_port##*:}"
+  require_file "${RUN_MOONCAKE_REMOTE_SERVER}"
 
-  require_file "${RUN_REDIS_REMOTE_SERVER}"
-
-  if is_port_listening "${REDIS_REMOTE_HOST}" "${REDIS_REMOTE_PORT}"; then
-    REDIS_WAS_LISTENING="1"
-    log "Redis backend already listening on ${REDIS_REMOTE_HOST}:${REDIS_REMOTE_PORT}; reusing existing service"
+  if is_port_listening "${backend_host}" "${backend_port}"; then
+    log "Mooncake backend already listening on ${backend_host}:${backend_port}; reusing existing service"
     return 0
   fi
 
-  REDIS_WAS_LISTENING="0"
-  log "Starting Redis remote backend on ${REDIS_REMOTE_HOST}:${REDIS_REMOTE_PORT}"
-  REDIS_HOST="${REDIS_REMOTE_HOST}" REDIS_PORT="${REDIS_REMOTE_PORT}" bash "${RUN_REDIS_REMOTE_SERVER}" start >/dev/null
+  log "Starting Mooncake remote backend on ${backend_host}:${backend_port}"
+  MOONCAKE_HOST="${backend_host}" MOONCAKE_MASTER_PORT="${backend_port}" bash "${RUN_MOONCAKE_REMOTE_SERVER}" start >/dev/null
 
-  if ! is_port_listening "${REDIS_REMOTE_HOST}" "${REDIS_REMOTE_PORT}"; then
-    log "[ERROR] Redis backend failed to start on ${REDIS_REMOTE_HOST}:${REDIS_REMOTE_PORT}"
+  if ! is_port_listening "${backend_host}" "${backend_port}"; then
+    log "[ERROR] Mooncake backend failed to start on ${backend_host}:${backend_port}"
     exit 1
   fi
 
-  REDIS_STARTED_BY_E2E="1"
-  log "Redis backend is ready on ${REDIS_REMOTE_HOST}:${REDIS_REMOTE_PORT}"
+  REMOTE_BACKEND_STARTED_BY_E2E="1"
+  log "Mooncake backend is ready on ${backend_host}:${backend_port}"
 }
 
 wait_for_url() {
@@ -479,12 +614,6 @@ start_instances() {
   ) >"${SERVER_A_LOG}" 2>&1 &
   PID_A=$!
 
-  log "Waiting for A readiness"
-  if ! wait_for_url "${BASE_URL_A}/v1/models" "${STARTUP_TIMEOUT_SECS}" "${PID_A}"; then
-    log "[ERROR] A failed to become ready. See ${SERVER_A_LOG}"
-    exit 1
-  fi
-
   log "Starting instance B at ${BASE_URL_B} (GPU ${GPU_B})"
   (
     CUDA_VISIBLE_DEVICES="${GPU_B}" \
@@ -496,6 +625,12 @@ start_instances() {
   ) >"${SERVER_B_LOG}" 2>&1 &
   PID_B=$!
 
+  log "Waiting for A readiness"
+  if ! wait_for_url "${BASE_URL_A}/v1/models" "${STARTUP_TIMEOUT_SECS}" "${PID_A}"; then
+    log "[ERROR] A failed to become ready. See ${SERVER_A_LOG}"
+    exit 1
+  fi
+
   log "Waiting for B readiness"
   if ! wait_for_url "${BASE_URL_B}/v1/models" "${STARTUP_TIMEOUT_SECS}" "${PID_B}"; then
     log "[ERROR] B failed to become ready. See ${SERVER_B_LOG}"
@@ -506,6 +641,8 @@ start_instances() {
 }
 
 main() {
+  resolve_lmcache_config_files
+
   if [[ "${START_INSTANCES}" == "1" ]]; then
     require_file "${RUN_LMCACHE_OFFLOAD}"
   fi
@@ -528,6 +665,11 @@ main() {
 
   validate_remote_backend
 
+  local shared_remote_url
+  shared_remote_url="$(get_remote_url_from_cfg "${LMCACHE_CONFIG_FILE_A}")"
+
+  log_effective_inputs
+
   echo "label,avg_lat_s,p99_lat_s,avg_ttft_ms,p99_ttft_ms,avg_tpot_ms,p99_tpot_ms" > "${RESULTS_CSV}"
 
   log "E2E run dir: ${RUN_DIR}"
@@ -538,7 +680,7 @@ main() {
   if [[ "${START_INSTANCES}" == "1" ]]; then
     log "GPU assignment: A=${GPU_A}, B=${GPU_B}, auto_select=${AUTO_SELECT_IDLE_GPUS}, idle_threshold=${IDLE_GPU_MEMORY_THRESHOLD_MIB}MiB"
   fi
-  start_remote_redis_if_needed
+  start_remote_backend_if_needed "${shared_remote_url}"
   if [[ "${START_INSTANCES}" == "1" ]]; then
     start_instances
   else
