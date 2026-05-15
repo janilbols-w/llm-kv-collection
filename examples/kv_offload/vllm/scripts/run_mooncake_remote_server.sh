@@ -10,6 +10,7 @@ MOONCAKE_MASTER_PORT="${MOONCAKE_MASTER_PORT:-50051}"
 MOONCAKE_HTTP_METADATA_HOST="${MOONCAKE_HTTP_METADATA_HOST:-0.0.0.0}"
 MOONCAKE_HTTP_METADATA_PORT="${MOONCAKE_HTTP_METADATA_PORT:-9980}"
 MOONCAKE_METRICS_PORT="${MOONCAKE_METRICS_PORT:-9003}"
+MOONCAKE_ENABLE_OFFLOAD="${MOONCAKE_ENABLE_OFFLOAD:-1}"
 
 MOONCAKE_MASTER_BIN="${MOONCAKE_MASTER_BIN:-mooncake_master}"
 MOONCAKE_LOG_FILE="${MOONCAKE_LOG_FILE:-${OUTPUT_ROOT}/mooncake_master_${MOONCAKE_MASTER_PORT}.log}"
@@ -151,6 +152,14 @@ start_mooncake() {
 	fi
 
 	log "Starting mooncake master on ${MOONCAKE_HOST}:${MOONCAKE_MASTER_PORT}"
+	local enable_offload_flag
+	enable_offload_flag=0
+	if [[ "${MOONCAKE_ENABLE_OFFLOAD,,}" == "1" || "${MOONCAKE_ENABLE_OFFLOAD,,}" == "true" || "${MOONCAKE_ENABLE_OFFLOAD,,}" == "yes" || "${MOONCAKE_ENABLE_OFFLOAD,,}" == "on" ]]; then
+		enable_offload_flag=1
+	fi
+
+	log "Mooncake offload mode: MOONCAKE_ENABLE_OFFLOAD=${MOONCAKE_ENABLE_OFFLOAD} -> --enable-offload=${enable_offload_flag}"
+
 	nohup "${MOONCAKE_MASTER_BIN}" \
 		--rpc_address="${MOONCAKE_HOST}" \
 		--rpc_port="${MOONCAKE_MASTER_PORT}" \
@@ -158,6 +167,7 @@ start_mooncake() {
 		--http_metadata_server_host="${MOONCAKE_HTTP_METADATA_HOST}" \
 		--http_metadata_server_port="${MOONCAKE_HTTP_METADATA_PORT}" \
 		--metrics_port="${MOONCAKE_METRICS_PORT}" \
+		--enable-offload="${enable_offload_flag}" \
 		"$@" >>"${MOONCAKE_LOG_FILE}" 2>&1 &
 
 	local pid
