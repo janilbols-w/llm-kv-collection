@@ -4,6 +4,7 @@
 # - Keep chunk_size / remote_serde / model/tokenizer settings aligned across instances.
 
 chunk_size: 256
+pre_caching_hash_algorithm: "sha256_cbor_64bit"
 local_cpu: true
 max_local_cpu_size: 8.0
 reserve_local_cpu_size: 0.0
@@ -26,7 +27,7 @@ extra_config:
   master_server_address: "127.0.0.1:50051"
   protocol: "tcp"
   device_name: ""
-  global_segment_size: 2147483648
+  global_segment_size: 8589934592
   local_buffer_size: 0
   save_chunk_meta: false
   use_exists_sync: true
