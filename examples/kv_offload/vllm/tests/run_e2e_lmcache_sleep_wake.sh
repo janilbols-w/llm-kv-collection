@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 KV_OFFLOAD_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 RUN_LMCACHE_OFFLOAD="${RUN_LMCACHE_OFFLOAD:-${KV_OFFLOAD_ROOT}/scripts/run_lmcache_offload.sh}"
+RUN_NAIVE_SERVICE="${RUN_NAIVE_SERVICE:-${KV_OFFLOAD_ROOT}/scripts/run_naive_service.sh}"
 RUN_EVALSCOPE_PERF="${RUN_EVALSCOPE_PERF:-${KV_OFFLOAD_ROOT}/scripts/run_evalscope_perf_random_case.sh}"
 SLEEP_WAKE_CLI="${SLEEP_WAKE_CLI:-${KV_OFFLOAD_ROOT}/scripts/vllm_sleep_wake_cli.py}"
 
@@ -33,7 +34,8 @@ EVAL_OUTPUT_ROOT="${RUN_DIR}/evalscope"
 PERF_FIXED_DATASET_DIR="${PERF_FIXED_DATASET_DIR:-${KV_OFFLOAD_ROOT}/data/custom_gen}"
 RESULTS_CSV="${RUN_DIR}/metrics.csv"
 CHECKS_LOG="${RUN_DIR}/checks.log"
-SERVER_LOG="${RUN_DIR}/server.log"
+BASELINE_SERVER_LOG="${RUN_DIR}/server_baseline.log"
+LMCACHE_SERVER_LOG="${RUN_DIR}/server_lmcache.log"
 
 SERVER_PID=""
 
@@ -46,16 +48,41 @@ log() {
 
 cleanup() {
   local exit_code=$?
+  stop_service
+  log "E2E finished with exit code ${exit_code}"
+  log "Run dir: ${RUN_DIR}"
+}
+trap cleanup EXIT
+
+stop_service() {
   if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
     log "Stopping server pid=${SERVER_PID}"
     kill "${SERVER_PID}" >/dev/null 2>&1 || true
     pkill -P "${SERVER_PID}" >/dev/null 2>&1 || true
     wait "${SERVER_PID}" >/dev/null 2>&1 || true
   fi
-  log "E2E finished with exit code ${exit_code}"
-  log "Run dir: ${RUN_DIR}"
+  SERVER_PID=""
 }
-trap cleanup EXIT
+
+start_naive_service() {
+  local server_log="$1"
+  stop_service
+  (
+    PORT="${PORT}" \
+    bash "${RUN_NAIVE_SERVICE}"
+  ) >"${server_log}" 2>&1 &
+  SERVER_PID=$!
+}
+
+start_lmcache_service() {
+  local server_log="$1"
+  stop_service
+  (
+    HOST="${HOST}" PORT="${PORT}" \
+    bash "${RUN_LMCACHE_OFFLOAD}"
+  ) >"${server_log}" 2>&1 &
+  SERVER_PID=$!
+}
 
 require_file() {
   local f="$1"
@@ -84,7 +111,7 @@ wait_for_service() {
     fi
 
     if [[ -n "${SERVER_PID}" ]] && ! kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
-      log "Server process exited early; see ${SERVER_LOG}"
+      log "Server process exited early (pid=${SERVER_PID})"
       return 1
     fi
 
@@ -196,6 +223,7 @@ trigger_sleep_wake() {
 
 main() {
   require_file "${RUN_LMCACHE_OFFLOAD}"
+  require_file "${RUN_NAIVE_SERVICE}"
   require_file "${RUN_EVALSCOPE_PERF}"
   require_file "${SLEEP_WAKE_CLI}"
   require_cmd curl
@@ -205,29 +233,43 @@ main() {
 
   log "E2E run dir: ${RUN_DIR}"
   log "Shared fixed dataset dir: ${PERF_FIXED_DATASET_DIR}"
+  log "Starting baseline service(no LMCache) via ${RUN_NAIVE_SERVICE}"
+
+  start_naive_service "${BASELINE_SERVER_LOG}"
+  log "Baseline server pid=${SERVER_PID}, log=${BASELINE_SERVER_LOG}"
+
+  log "Waiting for baseline service readiness: ${MODELS_URL}"
+  wait_for_service "${STARTUP_TIMEOUT_SECS}"
+  log "Baseline service is ready"
+
+  run_perf_case "case1_gpu_only_cold_start"
+  run_perf_case "case2_gpu_only_cache_hit"
+  trigger_sleep_wake
+
+  run_perf_case "case3_gpu_only_after_sleep_wake"
+
+  stop_service
+
   log "Starting LMCache offload service via ${RUN_LMCACHE_OFFLOAD}"
 
-  (
-    HOST="${HOST}" PORT="${PORT}" \
-    bash "${RUN_LMCACHE_OFFLOAD}"
-  ) >"${SERVER_LOG}" 2>&1 &
-  SERVER_PID=$!
-  log "Server pid=${SERVER_PID}, log=${SERVER_LOG}"
+  start_lmcache_service "${LMCACHE_SERVER_LOG}"
+  log "LMCache server pid=${SERVER_PID}, log=${LMCACHE_SERVER_LOG}"
 
-  log "Waiting for service readiness: ${MODELS_URL}"
+  log "Waiting for LMCache service readiness: ${MODELS_URL}"
   wait_for_service "${STARTUP_TIMEOUT_SECS}"
-  log "Service is ready"
+  log "LMCache service is ready"
 
-  run_perf_case "case1_cold_start"
-  run_perf_case "case2_cache_hit"
+  run_perf_case "case4_lmcache_cold_start"
+  run_perf_case "case5_lmcache_cache_hit"
 
   trigger_sleep_wake
 
-  run_perf_case "case3_after_sleep_wake"
+  run_perf_case "case6_lmcache_after_sleep_wake"
 
   log "All perf runs finished"
   log "Metrics CSV: ${RESULTS_CSV}"
-  log "Server log: ${SERVER_LOG}"
+  log "Baseline server log: ${BASELINE_SERVER_LOG}"
+  log "LMCache server log: ${LMCACHE_SERVER_LOG}"
 }
 
 main "$@"
