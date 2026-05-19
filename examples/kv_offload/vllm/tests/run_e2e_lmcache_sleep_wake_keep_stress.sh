@@ -6,7 +6,7 @@ KV_OFFLOAD_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 RUN_LMCACHE_OFFLOAD="${RUN_LMCACHE_OFFLOAD:-${KV_OFFLOAD_ROOT}/scripts/run_lmcache_offload.sh}"
 RUN_NAIVE_SERVICE="${RUN_NAIVE_SERVICE:-${KV_OFFLOAD_ROOT}/scripts/run_naive_service.sh}"
-RUN_EVALSCOPE_PERF="${RUN_EVALSCOPE_PERF:-${KV_OFFLOAD_ROOT}/scripts/run_evalscope_perf_random_case.sh}"
+RUN_EVALSCOPE_PERF="${RUN_EVALSCOPE_PERF:-${KV_OFFLOAD_ROOT}/../benchmarks/evalscope/run_evalscope_perf_random_case.sh}"
 RUN_CLEANUP_VLLM_RESIDUAL="${RUN_CLEANUP_VLLM_RESIDUAL:-${KV_OFFLOAD_ROOT}/scripts/cleanup_vllm_residual.sh}"
 SLEEP_WAKE_CLI="${SLEEP_WAKE_CLI:-${KV_OFFLOAD_ROOT}/scripts/vllm_sleep_wake_cli.py}"
 

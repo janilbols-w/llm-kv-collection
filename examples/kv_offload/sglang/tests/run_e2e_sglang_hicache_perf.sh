@@ -6,7 +6,7 @@ SGLANG_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 KV_OFFLOAD_ROOT="$(cd -- "${SGLANG_ROOT}/.." && pwd)"
 
 RUN_SGLANG_SERVICE="${RUN_SGLANG_SERVICE:-${SGLANG_ROOT}/scripts/run_sglang_service.sh}"
-RUN_EVALSCOPE_PERF="${RUN_EVALSCOPE_PERF:-${KV_OFFLOAD_ROOT}/vllm/scripts/run_evalscope_perf_random_case.sh}"
+RUN_EVALSCOPE_PERF="${RUN_EVALSCOPE_PERF:-${KV_OFFLOAD_ROOT}/benchmarks/evalscope/run_evalscope_perf_random_case.sh}"
 
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-12358}"
@@ -16,6 +16,11 @@ CHAT_URL="${CHAT_URL:-${BASE_URL}/v1/chat/completions}"
 
 STARTUP_TIMEOUT_SECS="${STARTUP_TIMEOUT_SECS:-300}"
 REQUEST_TIMEOUT_SECS="${REQUEST_TIMEOUT_SECS:-900}"
+MEMORY_OP_TIMEOUT_SECS="${MEMORY_OP_TIMEOUT_SECS:-120}"
+MEMORY_OP_ENABLED="${MEMORY_OP_ENABLED:-1}"
+MEMORY_OP_RELEASE_TAGS="${MEMORY_OP_RELEASE_TAGS:-weights kv_cache}"
+MEMORY_OP_RESUME_TAGS="${MEMORY_OP_RESUME_TAGS:-weights kv_cache}"
+ENABLE_MEMORY_SAVER="${ENABLE_MEMORY_SAVER:-1}"
 
 MODEL_PATH="${MODEL_PATH:-/data_ssd1/hz_home/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B}"
 MODEL_NAME="${MODEL_NAME:-mymodel}"
@@ -42,9 +47,11 @@ CASE1_DIR="${RUN_DIR}/case1_cold_start"
 CASE2_DIR="${RUN_DIR}/case2_cache_hit"
 CASE3_DIR="${RUN_DIR}/case3_cold_start"
 CASE4_DIR="${RUN_DIR}/case4_cache_hit"
+CASE5_DIR="${RUN_DIR}/case5_after_release_resume_cold_start"
+CASE6_DIR="${RUN_DIR}/case6_after_release_resume_cache_hit"
 
 SERVICE_PID=""
-mkdir -p "${RUN_DIR}" "${CASE1_DIR}" "${CASE2_DIR}" "${CASE3_DIR}" "${CASE4_DIR}" "${PERF_FIXED_DATASET_DIR}"
+mkdir -p "${RUN_DIR}" "${CASE1_DIR}" "${CASE2_DIR}" "${CASE3_DIR}" "${CASE4_DIR}" "${CASE5_DIR}" "${CASE6_DIR}" "${PERF_FIXED_DATASET_DIR}"
 
 log() {
   local msg="$*"
@@ -103,9 +110,51 @@ start_sglang_service() {
     TP="${TP}" \
     PAGE_SIZE="${PAGE_SIZE}" \
     MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC}" \
+    ENABLE_MEMORY_SAVER="${ENABLE_MEMORY_SAVER}" \
     bash "${RUN_SGLANG_SERVICE}"
   ) >"${server_log}" 2>&1 &
   SERVICE_PID=$!
+}
+
+build_tags_json_array() {
+  local tags_str="$1"
+  python3 - "$tags_str" <<'PY'
+import json
+import sys
+
+tags = [t for t in sys.argv[1].split() if t]
+print(json.dumps(tags, ensure_ascii=True), end="")
+PY
+}
+
+trigger_memory_occupation_api() {
+  local action="$1"
+  local tags_str="$2"
+  local output_file="$3"
+  local tags_json
+  tags_json="$(build_tags_json_array "${tags_str}")"
+  local payload
+  payload="{\"tags\":${tags_json}}"
+
+  curl -fsS --max-time "${MEMORY_OP_TIMEOUT_SECS}" \
+    -H 'Content-Type: application/json' \
+    -X POST \
+    -d "${payload}" \
+    "${BASE_URL}/${action}" >"${output_file}" 2>&1
+}
+
+trigger_release_resume() {
+  local case_dir="$1"
+  local release_log="${case_dir}/release_memory_occupation.json"
+  local resume_log="${case_dir}/resume_memory_occupation.json"
+
+  log "[MemoryOp] release_memory_occupation tags=${MEMORY_OP_RELEASE_TAGS}"
+  trigger_memory_occupation_api "release_memory_occupation" "${MEMORY_OP_RELEASE_TAGS}" "${release_log}"
+
+  log "[MemoryOp] resume_memory_occupation tags=${MEMORY_OP_RESUME_TAGS}"
+  trigger_memory_occupation_api "resume_memory_occupation" "${MEMORY_OP_RESUME_TAGS}" "${resume_log}"
+
+  wait_for_service "${MEMORY_OP_TIMEOUT_SECS}"
 }
 
 run_evalscope_case() {
@@ -231,7 +280,7 @@ write_startup_failed_status() {
 }
 
 write_report() {
-  python3 - "${CASE1_DIR}/status.txt" "${CASE2_DIR}/status.txt" "${CASE3_DIR}/status.txt" "${CASE4_DIR}/status.txt" "${REPORT_JSON}" <<'PY'
+  python3 - "${CASE1_DIR}/status.txt" "${CASE2_DIR}/status.txt" "${CASE3_DIR}/status.txt" "${CASE4_DIR}/status.txt" "${CASE5_DIR}/status.txt" "${CASE6_DIR}/status.txt" "${REPORT_JSON}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -255,8 +304,10 @@ report = {
   "case2_cache_hit": parse_status(sys.argv[2]),
   "case3_cold_start": parse_status(sys.argv[3]),
   "case4_cache_hit": parse_status(sys.argv[4]),
+  "case5_after_release_resume_cold_start": parse_status(sys.argv[5]),
+  "case6_after_release_resume_cache_hit": parse_status(sys.argv[6]),
 }
-Path(sys.argv[5]).write_text(json.dumps(report, indent=2, ensure_ascii=True), encoding="utf-8")
+Path(sys.argv[7]).write_text(json.dumps(report, indent=2, ensure_ascii=True), encoding="utf-8")
 print(json.dumps(report, ensure_ascii=True))
 PY
 }
@@ -309,6 +360,8 @@ main() {
     overall_rc=1
     write_startup_failed_status "hicache_l1_l2" "${CASE3_DIR}"
     write_startup_failed_status "hicache_l1_l2" "${CASE4_DIR}"
+    write_startup_failed_status "hicache_l1_l2" "${CASE5_DIR}"
+    write_startup_failed_status "hicache_l1_l2" "${CASE6_DIR}"
     log "[hicache_l1_l2] fail startup; mark case3/case4 failed"
   else
     if ! run_case "hicache_l1_l2" "Case3(cold_start)" "${CASE3_DIR}"; then
@@ -318,6 +371,42 @@ main() {
     if ! run_case "hicache_l1_l2" "Case4(cache_hit)" "${CASE4_DIR}"; then
       overall_rc=1
     fi
+
+    if [[ "${MEMORY_OP_ENABLED}" == "1" ]]; then
+      if ! trigger_release_resume "${CASE5_DIR}"; then
+        overall_rc=1
+        {
+          echo "status=fail"
+          echo "reason=release_resume_failed"
+          echo "mode=hicache_l1_l2"
+        } >"${CASE5_DIR}/status.txt"
+        {
+          echo "status=fail"
+          echo "reason=release_resume_failed"
+          echo "mode=hicache_l1_l2"
+        } >"${CASE6_DIR}/status.txt"
+        log "[MemoryOp] release/resume failed; mark case5/case6 failed"
+      else
+        if ! run_case "hicache_l1_l2" "Case5(after_release_resume_cold_start)" "${CASE5_DIR}"; then
+          overall_rc=1
+        fi
+        if ! run_case "hicache_l1_l2" "Case6(after_release_resume_cache_hit)" "${CASE6_DIR}"; then
+          overall_rc=1
+        fi
+      fi
+    else
+      {
+        echo "status=skip"
+        echo "reason=memory_op_disabled"
+        echo "mode=hicache_l1_l2"
+      } >"${CASE5_DIR}/status.txt"
+      {
+        echo "status=skip"
+        echo "reason=memory_op_disabled"
+        echo "mode=hicache_l1_l2"
+      } >"${CASE6_DIR}/status.txt"
+      log "[MemoryOp] disabled; skip case5/case6"
+    fi
   fi
   stop_service
 
@@ -325,6 +414,8 @@ main() {
   append_group_metrics "case2_cache_hit" "${CASE2_DIR}"
   append_group_metrics "case3_cold_start" "${CASE3_DIR}"
   append_group_metrics "case4_cache_hit" "${CASE4_DIR}"
+  append_group_metrics "case5_after_release_resume_cold_start" "${CASE5_DIR}"
+  append_group_metrics "case6_after_release_resume_cache_hit" "${CASE6_DIR}"
 
   write_report >>"${CHECKS_LOG}" 2>&1 || true
   log "Report: ${REPORT_JSON}"
